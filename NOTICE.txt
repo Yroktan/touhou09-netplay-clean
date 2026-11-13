@@ -1,0 +1,6 @@
+Touhou 09 Netplay is based on the Cirno-Labs/th09 reconstruction.
+Upstream: https://github.com/Cirno-Labs/th09
+Game source and modifications: GPL-3.0; see LICENSE and client/LICENSE.
+Reconstruction utilities: see client/tools/LICENSE.
+toolchain/vsdownload.py: Martin Storsjo, ISC; the original copyright and permission notice is in toolchain/LICENSE.vsdownload.txt.
+Original game assets and Microsoft SDKs remain the property of their respective owners and are not part of the release.

@@ -1,0 +1,277 @@
+# decomp-tools
+
+Tooling for matching decompilations of Touhou games built with MSVC 7
+(Visual C++ .NET 2002) under Wine, on Linux. The goal of such a project
+is C++ source that compiles, with the original toolchain, into code
+byte-for-byte identical to the original executable.
+
+The tools compile the game's source under Wine, compare every function
+with the original byte for byte, hook the new code into the running game
+through a DLL, link a standalone executable and compare it with the
+original section by section, drive the game headless under Xvfb, and
+analyze the original with headless Ghidra.
+
+## Clean room
+
+This repository holds tools only. It contains no game code or data, no
+decompiled source, no symbol tables and nothing from Microsoft's
+toolchain or SDKs. Each game repository brings its own source and
+symbols, and each user brings their own copy of the game and the
+compiler.
+
+## Using it in a game repository
+
+A game repository includes this repository as a git submodule at
+`tools/`, describes itself in `project.toml` at its root, and
+imports the shared recipes into its justfile:
+
+```just
+import 'tools/common.just'
+
+# the game's own recipes follow
+```
+
+It expects this layout around it:
+
+```
+project.toml  the game's settings (see below)
+justfile      imports tools/common.just
+config/       symbols.csv: address, size, name and mangled symbol
+src/          decompiled source; src/dll/ is the hook DLL's own code,
+              src/exe/ the data and globals only the standalone exe builds
+orig/         the user's game files (not tracked) and their checksums
+.wine/        the Wine prefix with the toolchain (not tracked)
+build/        outputs
+tools/        this repository
+```
+
+`examples/` has the configuration of th06, th07 and th08, and th06's
+build hook. To add the tools to a game repository:
+
+```sh
+git submodule add https://github.com/Cirno-Labs/decomp-tools.git tools
+cp tools/examples/th07.toml project.toml   # then adapt it
+echo "import 'tools/common.just'" > justfile
+just tools-init hooks
+```
+
+## Recipes
+
+`just` lists them. `common.just` has:
+
+| Recipe | Does |
+| --- | --- |
+| `build` | compile `src/` and link the hook DLL, `build/<name>.dll` |
+| `compare [SYMBOL...]` | compare every compiled function with the original; disassembly diffs for SYMBOLs |
+| `game` | set up `build/game/`: the game's files, an exe patched to load the DLL, the DLL |
+| `run [STEP...]` | run the patched game headless (`wait:S key:K hold:K:S shot:NAME`) |
+| `exe [STEP...]` | link the standalone `build/<name>.exe`; `FEAT=a,b` turns on features |
+| `check-exe` | link the standalone exe and fail unless it is the original byte for byte |
+| `compare-exe [-v]` | compare the standalone exe with the original, section by section |
+| `replay [RPY...]` | play replays to their end headless in the original, twice, and the standalone exe, and compare every calculation (`replay/replay.py`, with `replay.hook`) |
+| `psdk-libs ZIP` | extract VS.NET 2002's Platform SDK import libraries from its install media |
+| `analyze` | analyze the original with headless Ghidra, seed `config/symbols.csv` |
+| `decompile [ADDR...]` | write Ghidra's pseudocode to `build/decomp/` |
+| `permute NAME [ARGS]` | search source variants of a function for a byte match (see [The permuter](#the-permuter)) |
+| `farm [ARGS]` | permute every `hooks.allow_diff` function unattended, several at once |
+| `progress` | build, then render `docs/progress.svg` |
+| `hooks` | use `tools/hooks/`: 50/72 commit messages without type prefixes or trailers, with `hooks.compare` only matching functions besides `hooks.allow_diff`, with `hooks.readme` only existing paths in `README.md`, and with `hooks.progress` a progress image in every commit |
+| `clean` | remove build outputs (keeps the Ghidra project) |
+
+Compiles run on half the cores; `JOBS` overrides it. Ghidra is found
+through `GHIDRA`, `ghidra.path` or the newest `~/opt/ghidra_*`.
+
+### The submodule
+
+| Recipe | Runs |
+| --- | --- |
+| `tools-init` | `git submodule update --init tools`, then puts `tools/` on a `main` branch at the recorded commit |
+| `tools-pull` | `git pull --ff-only` on `tools/`' `main` |
+| `tools-push` | `git push` of `tools/`' `main` to `git@github.com:Cirno-Labs/decomp-tools.git` |
+
+`tools/` is a checkout of this repository, so a change to the tools is
+a commit made inside `tools/` (`git -C tools commit`), pushed with
+`just tools-push`. The game repository then records the new commit
+with a commit of its own (`git add tools`). In the other games,
+`just tools-pull` and commit the pointer the same way.
+
+A fresh clone of a game needs `git clone --recursive`, or
+`git submodule update --init tools` after it: the justfile imports
+from `tools/`, so `just` can't run before. Either leaves `tools/` on a
+detached HEAD, where a commit belongs to no branch; `just tools-init`
+puts it on `main` at the same commit.
+
+## Tools
+
+| File | Does |
+| --- | --- |
+| `project.py` | reads `project.toml`; the `orig`, `game`, `standalone`, `check-exe` and `clean` steps |
+| `build.py` | compiles `src/` (Shift-JIS, per-file flags, parallel), writes the hook table and thunks, links the DLL and the standalone exe |
+| `compare.py` | compares compiled functions with the original, relocations resolved through `symbols.csv` |
+| `compare_exe.py` | compares the standalone exe with the original: headers, Rich header, sections, imports, code and data by symbol |
+| `order.py` | lists, per object, which of the standalone exe's functions sit at their original address and in the original's order (`--summary`: one line per object) |
+| `reorder.py` | sorts a `.cpp`'s function definitions into the original's address order |
+| `patch_exe.py` | adds the hook DLL to a copy of the original's import table |
+| `play.py` | runs the game under Xvfb, sends keys, takes screenshots |
+| `seed_symbols.py` | adds Ghidra's functions and the imports to `symbols.csv` |
+| `name.py` | names a row of `symbols.csv` |
+| `rename.py` | renames functions in the working tree or throughout history |
+| `render_progress.py` | draws the progress image |
+| `permute.py` | searches rewrites of one function (declaration, operand and statement order, if/else, loop and condition forms) for a byte match, compiling each variant alone |
+| `farm.py` | runs `permute.py` over every `hooks.allow_diff` function, several at once, unattended; keeps matching bodies in `build/farm/`, and `--apply` writes them into `src/` |
+| `gate.py` | the commit rule `hooks.compare` turns on, for the pre-commit hook |
+| `readme_paths.py` | the commit rule `hooks.readme` turns on: every repository path `README.md` names must exist |
+| `locals.py` | predicts and picks local variable names for a wanted stack layout under `/Od` |
+| `psdk_libs.py`, `msi_extract.py` | extract import libraries from the VS.NET 2002 media |
+| `coff.py`, `rsrc.py`, `peinfo.py` | COFF objects, resources, PE and Rich header |
+| `ghidra/` | headless Ghidra: analysis, function export, decompilation |
+| `hooks/` | `commit-msg` and `pre-commit` |
+
+## project.toml
+
+Paths are relative to the game repository's root. Hex numbers are
+written as such (`0x46004B`). `DECOMP_PROJECT` names another file.
+
+### `[game]`
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `name` | required | short name: `build/<name>.dll`, `build/<name>.exe`, `<name>.exe` in `build/game/`, the hook log's prefix |
+| `dir` | required | the original game's files, such as `orig/th07_100b` |
+| `exe` | required | the original executable's file name in `dir` |
+| `original` | required | where the verified executable is copied, an ASCII path such as `build/th07_100b.exe` |
+| `game_end` | required | the address the game's code ends at; library code follows |
+| `checksums` | none | a `sha1sum -c` file, run from its own directory |
+| `title` | `name` | the progress image's title |
+| `progress_exclude` | `[]` | name globs of `symbols.csv` rows no source makes, such as linker thunks, left out of the progress |
+| `window_title` | `title` | the window `play.py` looks for |
+| `standalone_extras` | `[]` | globs copied into `build/game/` with the standalone exe |
+
+### `[ghidra]`
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `path` | none | the Ghidra installation; `GHIDRA` overrides it |
+| `project` | `original`'s name without `.exe` | the Ghidra project in `build/ghidra/` |
+| `functions` | `build/functions_<project>.csv` | the exported function list |
+
+### `[build]`
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `cflags` | required | the compiler flags; a source file's first line `// cflags: /Os -/Oi` adds and removes some |
+| `bin` | `C:\msvc7\bin` | where `cl.exe` and `link.exe` are, in the Wine prefix |
+| `include` | `C:\dx8\include`, `C:\msvc7\include`, `C:\psdk\Include` | `INCLUDE` |
+| `lib` | `C:\dx8\lib`, `C:\msvc7\lib`, `C:\msvc7\PlatformSDK\Lib`, `C:\psdk\Lib` | `LIB`, in search order |
+| `timeout` | `60` | seconds before a compile counts as hung |
+| `hook` | none | a Python file with the game's own build steps, see below |
+
+### `[dll]`
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `ldflags` | `/DLL /NODEFAULTLIB /ENTRY:DllMain /BASE:0x30000000` | the hook DLL's linker flags |
+| `libs` | `kernel32.lib user32.lib winmm.lib` | its libraries |
+
+### `[exe]`
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `obj_dir` | `build/obj_exe` | the standalone exe's objects; `build/obj` shares the DLL's |
+| `cflags` | `[]` | flags added to `build.cflags`, before a file's own; with `/GL` the exe is a second, `/LTCG` build and the plain objects give the link order |
+| `defines` | `[]` | macros defined after a file's own flags (`TH06_EXE=1`) |
+| `link_order` | `median` | object order: by the `median` or `first` original address of the functions only that object defines, or `source` order |
+| `pch` | `""` | a header in `src/` to precompile (`global.h`): each object directory gets a `/Yc` stub, `pch.obj`, and every file whose `// cflags:` line changes no `/O` flag is compiled with `/FI` and `/Yu`. The header's inline functions then go at the end of each object, in the header's order, as in an original built that way |
+| `ldflags` | `/SUBSYSTEM:WINDOWS /FIXED /NODEFAULTLIB:libc.lib` | linker flags |
+| `libs` | `libcmt.lib` | libraries, in the original's order |
+| `features` | `{}` | `FEAT` names and their macros: `frame_cap = "FEAT_FRAME_CAP"` compiles `FEAT=frame_cap` into `build/obj_frame_cap` with `/DFEAT_FRAME_CAP=1` |
+| `feature_sources` | `{}` | sources only the exe with a feature builds and links: `frame_cap = ["src/exe/framecap.cpp"]`; without the feature they make no object, which would still count in the Rich header |
+
+The exe's map is `build/<name>_exe.map`, the DLL's `build/<name>.map`.
+
+### `[psdk]`, `[symbols]`, `[hooks]`, `[replay]`
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `psdk.libs` | `[]` | the import libraries `psdk-libs` extracts, as named on the media (`User32.Lib`) |
+| `symbols.import_libs` | `.wine/drive_c/psdk/Lib`, `.wine/drive_c/dx8/lib` | where `seed_symbols.py` looks up decorated import names |
+| `hooks.progress` | `false` | the pre-commit hook redraws `docs/progress.svg` and adds it |
+| `hooks.compare` | `false` | the pre-commit hook fails unless every compiled function matches the original, or `hooks.allow_diff` lists it |
+| `hooks.readme` | `false` | the pre-commit hook fails if `README.md` names a repository path that doesn't exist (gitignored places such as `build/` are skipped) |
+| `hooks.allow_diff` | `[]` | functions, by their `symbols.csv` name, that are in `src/` though they don't match yet; `farm` permutes these |
+| `replay.hook` | none | the game's Python file for `replay/replay.py`: its replay format, what its tracer patches and reads, and the run's setup (`replay.py` documents it) |
+
+With `hooks.compare`, the pre-commit hook builds `src/` and runs the
+comparison (`gate.py`); `src/` and `config/` may then have no unstaged
+changes, so that what is built is what is committed. It also fails
+when a function HEAD's `docs/progress.svg` shows as matching is no
+longer compiled, such as one now inlined everywhere. A commit that
+makes a listed function match takes it off `hooks.allow_diff`. For a
+group of functions that only match together, commit them one at a time
+with `DECOMP_ALLOW_DIFF=NAME[,NAME...]` set: the named functions may
+differ in that commit. `git commit --no-verify` skips the hooks.
+
+### The build hook
+
+`build.hook` is for what the settings don't cover. The file may define:
+
+- `exe_flags(feats)`: extra compiler flags for the standalone exe's
+  objects, given the features asked for; it may also generate the files
+  they need
+- `headers()`: more headers whose changes rebuild everything
+- `exe_resources(feats)`: the executable whose resources the standalone
+  exe gets, instead of the original's
+
+`examples/th06_build_hook.py` is th06's, for its English feature.
+
+## The permuter
+
+`just permute NAME` takes a function's definition in `src/` (NAME as
+`symbols.csv` names it, `Stage::DrawLayer`), applies random rewrites
+and compiles each variant alone with the file's flags, without
+linking. A variant scores the instructions that differ from the
+original, as `compare` cuts the function, plus 1000 for each other
+function of the file it breaks; the search climbs towards 0. Most
+rewrites must touch the lines whose code differs, which a `/Zd`
+compile maps to source lines. `src/` is never written: the best
+variant goes to `build/permute/STEM.c` (STEM is NAME with `::` as
+`-`) and is printed as a diff. A variant that matches byte for byte is
+correct by the match; any other may have changed the meaning.
+
+| Option | Does |
+| --- | --- |
+| `-j N`, `-t S`, `-s SEED` | compiles at once, seconds, random seed |
+| `--start FILE` | start from an earlier best variant |
+| `--file` | also move the file's top-level declarations; the variant goes to `STEM.file` whole |
+| `--sweep` | enumerate instead: declaration orders, operand swaps and single rewrites at the differing lines, beam search until a pass finds nothing (`sweep exhausted`) |
+| `--decls` | every order of the local declarations, which decides stack slots and can sway registers |
+| `--pad`, `--plan` | look for a shift of the compiler's symbol IDs (a VC5 effect, not seen with MSVC 7.1 so far) |
+
+`just farm` runs it over every `hooks.allow_diff` function (or the
+NAMEs given), `-p` functions at a time with `-j` compiles each, rounds
+of a sweep and a `-t` second random search from the best variant so
+far, `-r` rounds (0: until stopped). Matches land in `build/farm/`;
+`just farm --apply NAME` writes one into `src/`. Under Wine, a
+wineserver stays up between compiles, which makes each several times
+faster. On Windows, `build.py` runs the compiler directly, finding
+`C:\` paths of the build settings under `.wine/drive_c` first, and
+`compare.py` disassembles with capstone, so a copy of the repository
+with its prefix's `drive_c` and the original exe can farm there; copy
+`build/farm/` back.
+
+## Requirements
+
+- Python 3.11 or later (for `tomllib`), [just](https://github.com/casey/just)
+  recent enough for the `[default]` attribute (tested with 1.58)
+- Wine (32-bit, with its `msidb`), binutils (`objdump`), 7-Zip
+- For `run`: Xvfb, xdotool, ImageMagick, 32-bit Mesa OpenGL and the
+  `ja_JP.UTF-8` locale
+- The original toolchain in the Wine prefix (bring your own copies)
+- Ghidra, for analysis
+- On Windows (`permute`, `farm`, `build`, `compare` only): Python with
+  `capstone`, run in UTF-8 mode (`PYTHONUTF8=1`)
+
+## License
+
+GNU General Public License, version 3 only (`GPL-3.0-only`), see
+[`LICENSE`](LICENSE).

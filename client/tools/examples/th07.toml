@@ -1,0 +1,37 @@
+
+
+[game]
+name = "th07"
+title = "東方妖々夢 1.00b"
+window_title = "東方妖々夢"
+dir = "orig/th07_100b"
+exe = "th07.exe"
+checksums = "orig/th07_100b.sha1"
+original = "build/th07_100b.exe"
+game_end = 0x46004B  
+
+[ghidra]
+project = "th07_100b"
+functions = "build/functions_100b.csv"
+
+[build]
+cflags = ["/Od", "/Ob1", "/Gr", "/GX", "/Oi", "/Gy", "/GF"]
+
+[exe]
+
+
+obj_dir = "build/obj_gl"
+cflags = ["/GL", "/DTH07_EXE"]
+link_order = "median"
+ldflags = ["/LTCG", "/SUBSYSTEM:WINDOWS", "/FIXED", "/OPT:REF", "/OPT:ICF", "/OPT:NOWIN98",
+           "/NODEFAULTLIB:libc.lib"]
+
+
+libs = ["dinput8.lib", "dsound.lib", "d3d8.lib", "d3dx8.lib", "dxguid.lib", "winmm.lib",
+        "kernel32.lib", "user32.lib", "gdi32.lib", "ole32.lib", "uuid.lib", "libcmt.lib"]
+
+[psdk]
+libs = ["Gdi32.Lib", "Kernel32.Lib", "Ole32.Lib", "User32.Lib", "Uuid.Lib", "WinMM.Lib"]
+
+[hooks]
+progress = true

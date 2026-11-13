@@ -1,0 +1,1246 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+import argparse
+import csv
+import functools
+import glob
+import hashlib
+import os
+import multiprocessing.pool
+import json
+import platform
+import re
+import shutil
+import socket
+socket.setdefaulttimeout(45)
+import subprocess
+import sys
+import tempfile
+import urllib.request
+import zipfile
+
+try:
+    from lxml import etree as ET
+except ImportError:
+    import xml.etree.ElementTree as ET
+
+def getArgsParser():
+    class OptionalBoolean(argparse.Action):
+        def __init__(self,
+                    option_strings,
+                    dest,
+                    default=None,
+                    help=None):
+
+            if default is not None:
+                default_string = "yes" if default else "no"
+                if help is None:
+                    help = "default: " + default_string
+                else:
+                    help += " (default: %s)" % default_string
+
+            super().__init__(
+                option_strings=option_strings,
+                dest=dest,
+                nargs='?',
+                default=default,
+                choices=["yes", "no"],
+                help=help,
+                metavar="yes|no")
+
+        def __call__(self, parser, namespace, values, option_string=None):
+            setattr(namespace, self.dest, values != "no")
+
+    parser = argparse.ArgumentParser(description = "Download and install Visual Studio")
+    parser.add_argument("--manifest", metavar="manifest", help="A predownloaded manifest file")
+    parser.add_argument("--save-manifest", const=True, action="store_const", help="Store the downloaded manifest to a file")
+    parser.add_argument("--major", default=18, type=int, metavar="version", help="The major version to download (defaults to 18)")
+    parser.add_argument("--preview", const=True, action="store_const", help="Download the preview version instead of the release version")
+    parser.add_argument("--cache", metavar="dir", help="Directory to use as a persistent cache for downloaded files")
+    parser.add_argument("--dest", metavar="dir", help="Directory to install into")
+    parser.add_argument("package", metavar="package", help="Package to install. If omitted, installs the default command line tools.", nargs="*")
+    parser.add_argument("--ignore", metavar="component", help="Package to skip", default=[], action="append")
+    parser.add_argument("--accept-license", const=True, action="store_const", help="Don't prompt for accepting the license")
+    parser.add_argument("--print-version", const=True, action="store_const", help="Stop after fetching the manifest")
+    parser.add_argument("--list-workloads", const=True, action="store_const", help="List high level workloads")
+    parser.add_argument("--list-components", const=True, action="store_const", help="List available components")
+    parser.add_argument("--list-packages", const=True, action="store_const", help="List all individual packages, regardless of type")
+    parser.add_argument("--include-optional", const=True, action="store_const", help="Include all optional dependencies")
+    parser.add_argument("--skip-recommended", const=True, action="store_const", help="Don't include recommended dependencies")
+    parser.add_argument("--print-deps-tree", const=True, action="store_const", help="Print a tree of resolved dependencies for the given selection")
+    parser.add_argument("--print-reverse-deps", const=True, action="store_const", help="Print a tree of packages that depend on the given selection")
+    parser.add_argument("--print-selection", const=True, action="store_const", help="Print a list of the individual packages that are selected to be installed")
+    parser.add_argument("--verify-selection", metavar="file", help="Verify the selected packages against a file with a list of package id regex")
+    parser.add_argument("--only-download", const=True, action="store_const", help="Stop after downloading package files")
+    parser.add_argument("--only-unpack", const=True, action="store_const", help="Unpack the selected packages and keep all files, in the layout they are unpacked, don't restructure and prune files other than what's needed for MSVC CLI tools")
+    parser.add_argument("--keep-unpack", const=True, action="store_const", help="Keep the unpacked files that aren't otherwise selected as needed output")
+    parser.add_argument("--msvc-version", metavar="version", help="Install a specific MSVC Build Tools version")
+    parser.add_argument("--sdk-version", metavar="version", help="Install a specific Windows SDK version")
+    parser.add_argument("--architecture", metavar="arch", choices=["host", "x86", "x64", "arm", "arm64"], help="Target architectures to include (defaults to all)", nargs="+")
+    parser.add_argument("--with-default", action=OptionalBoolean, help="Include default packages, true if no package specified")
+    parser.add_argument("--with-workload", action=OptionalBoolean, help="Include VC tools workload")
+    parser.add_argument("--with-msvc", action=OptionalBoolean, help="Include MSVC Build Tools (default)")
+    parser.add_argument("--with-asan", action=OptionalBoolean, help="Include ASAN runtime (default)")
+    parser.add_argument("--with-sdk", action=OptionalBoolean, help="Include Windows SDK (default)")
+    parser.add_argument("--with-atl", action=OptionalBoolean, help="Include ATL (default)")
+    parser.add_argument("--with-mfc", action=OptionalBoolean, help="Include MFC")
+    parser.add_argument("--with-dia", action=OptionalBoolean, help="Include DIA SDK (default)")
+    parser.add_argument("--with-msbuild", action=OptionalBoolean, help="Include MSBuild (default)")
+    parser.add_argument("--with-devcmd", action=OptionalBoolean, help="Include Visual Studio Developer Command Prompt (default)")
+    parser.add_argument("--with-llvm", action=OptionalBoolean, help="Include LLVM")
+    parser.add_argument("--with-wdk-installers", metavar="dir", help="Install Windows Driver Kit using the provided MSI installers")
+    parser.add_argument("--host-arch", metavar="arch", choices=["x86", "x64", "arm64"], help="Specify the host architecture of packages to install")
+    parser.add_argument("--only-host", default=True, action=OptionalBoolean, help="Only download packages that match host arch")
+    parser.add_argument("--skip-patch", action="store_true", help="Don't patch downloaded packages")
+    parser.add_argument("--language", metavar="xx[-YY]", default="en", help="Preferred language code for packages available in multiple languages (defaults to en)")
+    return parser
+
+def appendPackageSelection(args, flag, package):
+    if flag == True:
+        args.package.append(package)
+    elif flag == False:
+        args.ignore.append(package)
+
+def setPackageSelectionMSVC16(args, packages, userversion, sdk, toolversion, defaultPackages, defaultIgnores):
+    ext = ".Tools" if toolversion == "Preview" else ""
+    if findPackage(packages, "Microsoft.VisualStudio.Component.VC." + toolversion + ext + ".x86.x64", warn=False):
+        if "x86" in args.architecture or "x64" in args.architecture:
+            appendPackageSelection(args, args.with_msvc, "Microsoft.VisualStudio.Component.VC." + toolversion + ext + ".x86.x64")
+            appendPackageSelection(args, args.with_asan, "Microsoft.VC." + toolversion + ".ASAN.X86")
+            appendPackageSelection(args, args.with_atl, "Microsoft.VisualStudio.Component.VC." + toolversion + ".ATL")
+            appendPackageSelection(args, args.with_mfc, "Microsoft.VisualStudio.Component.VC." + toolversion + ".MFC")
+        if "arm" in args.architecture:
+            appendPackageSelection(args, args.with_msvc, "Microsoft.VisualStudio.Component.VC." + toolversion + ".ARM")
+            appendPackageSelection(args, args.with_atl, "Microsoft.VisualStudio.Component.VC." + toolversion + ".ATL.ARM")
+            appendPackageSelection(args, args.with_mfc, "Microsoft.VisualStudio.Component.VC." + toolversion + ".MFC.ARM")
+        if "arm64" in args.architecture:
+            appendPackageSelection(args, args.with_msvc, "Microsoft.VisualStudio.Component.VC." + toolversion + ".ARM64")
+            appendPackageSelection(args, args.with_atl, "Microsoft.VisualStudio.Component.VC." + toolversion + ".ATL.ARM64")
+            appendPackageSelection(args, args.with_mfc, "Microsoft.VisualStudio.Component.VC." + toolversion + ".MFC.ARM64")
+
+        if args.sdk_version == None:
+            args.sdk_version = sdk
+    else:
+        
+        
+        
+        print("Didn't find exact version packages for " + userversion + ", assuming this is provided by the default/latest version")
+        args.package.extend(defaultPackages)
+        args.ignore.extend(defaultIgnores)
+
+def setPackageSelectionMSVC15(args, packages, userversion, sdk, toolversion, defaultPackages, defaultIgnores):
+    if findPackage(packages, "Microsoft.VisualStudio.Component.VC.Tools." + toolversion, warn=False):
+        appendPackageSelection(args, args.with_msvc, "Microsoft.VisualStudio.Component.VC.Tools." + toolversion)
+        if args.sdk_version == None:
+            args.sdk_version = sdk
+    else:
+        
+        
+        
+        print("Didn't find exact version packages for " + userversion + ", assuming this is provided by the default/latest version")
+        args.package.extend(defaultPackages)
+        args.ignore.extend(defaultIgnores)
+
+def setPackageSelection(args, packages):
+    if not args.architecture:
+        args.architecture = ["host", "x86", "x64", "arm", "arm64"]
+    if args.host_arch is not None and "host" in args.architecture:
+        args.architecture.append(args.host_arch)
+
+    
+    if args.msvc_version is not None:
+        if args.with_msvc is None:
+            args.with_msvc = True
+        if args.with_asan is None:
+            args.with_asan = True
+        if args.with_atl is None:
+            args.with_atl = True
+        if args.with_sdk is None:
+            args.with_sdk = True
+    if args.sdk_version is not None:
+        if args.with_sdk is None:
+            args.with_sdk = True
+
+    if args.with_default is None:
+        if args.msvc_version is None and len(args.package) == 0:
+            args.with_default = True
+
+    if args.with_default is not None:
+        for component in ["msvc", "asan", "sdk", "atl", "dia", "msbuild", "devcmd"]:
+            if getattr(args, "with_" + component) is None:
+                setattr(args, "with_" + component, args.with_default)
+
+    if args.preview and args.major >= 18 and args.msvc_version is None:
+        args.msvc_version = "preview"
+
+    
+    
+
+    
+    
+    defaultPackages, args.package = args.package, []
+    defaultIgnores, args.ignore = args.ignore, []
+
+    if "x86" in args.architecture or "x64" in args.architecture:
+        appendPackageSelection(args, args.with_msvc, "Microsoft.VisualStudio.Component.VC.Tools.x86.x64")
+        appendPackageSelection(args, args.with_asan, "Microsoft.VisualCpp.ASAN.X86")
+        appendPackageSelection(args, args.with_atl, "Microsoft.VisualStudio.Component.VC.ATL")
+        appendPackageSelection(args, args.with_mfc, "Microsoft.VisualStudio.Component.VC.ATLMFC")
+    if "arm" in args.architecture:
+        appendPackageSelection(args, args.with_msvc, "Microsoft.VisualStudio.Component.VC.Tools.ARM")
+        appendPackageSelection(args, args.with_atl, "Microsoft.VisualStudio.Component.VC.ATL.ARM")
+        appendPackageSelection(args, args.with_mfc, "Microsoft.VisualStudio.Component.VC.MFC.ARM")
+    if "arm64" in args.architecture:
+        appendPackageSelection(args, args.with_msvc, "Microsoft.VisualStudio.Component.VC.Tools.ARM64")
+        appendPackageSelection(args, args.with_atl, "Microsoft.VisualStudio.Component.VC.ATL.ARM64")
+        appendPackageSelection(args, args.with_mfc, "Microsoft.VisualStudio.Component.VC.MFC.ARM64")
+
+    defaultPackages, args.package = args.package, defaultPackages
+    defaultIgnores, args.ignore = args.ignore, defaultIgnores
+
+    def ide(ver):
+        
+        
+        
+        
+        
+        return ver
+
+    
+    
+    
+    if args.msvc_version is None or args.msvc_version == "latest":
+        args.package.extend(defaultPackages)
+        args.ignore.extend(defaultIgnores)
+    elif args.msvc_version == "preview":
+        setPackageSelectionMSVC16(args, packages, args.msvc_version, None, "Preview", defaultPackages, defaultIgnores)
+    elif args.msvc_version in (ide("16.0"), "14.20"):
+        setPackageSelectionMSVC16(args, packages, args.msvc_version, "10.0.17763", "14.20", defaultPackages, defaultIgnores)
+    elif args.msvc_version in (ide("16.1"), "14.21"):
+        setPackageSelectionMSVC16(args, packages, args.msvc_version, "10.0.18362", "14.21", defaultPackages, defaultIgnores)
+    elif args.msvc_version in (ide("16.2"), "14.22"):
+        setPackageSelectionMSVC16(args, packages, args.msvc_version, "10.0.18362", "14.22", defaultPackages, defaultIgnores)
+    elif args.msvc_version in (ide("16.3"), "14.23"):
+        setPackageSelectionMSVC16(args, packages, args.msvc_version, "10.0.18362", "14.23", defaultPackages, defaultIgnores)
+    elif args.msvc_version in (ide("16.4"), "14.24"):
+        setPackageSelectionMSVC16(args, packages, args.msvc_version, "10.0.18362", "14.24", defaultPackages, defaultIgnores)
+    elif args.msvc_version in (ide("16.5"), "14.25"):
+        setPackageSelectionMSVC16(args, packages, args.msvc_version, "10.0.18362", "14.25", defaultPackages, defaultIgnores)
+    elif args.msvc_version in (ide("16.6"), "14.26"):
+        setPackageSelectionMSVC16(args, packages, args.msvc_version, "10.0.18362", "14.26", defaultPackages, defaultIgnores)
+    elif args.msvc_version in (ide("16.7"), "14.27"):
+        setPackageSelectionMSVC16(args, packages, args.msvc_version, "10.0.18362", "14.27", defaultPackages, defaultIgnores)
+    elif args.msvc_version in (ide("16.8"), "14.28"):
+        setPackageSelectionMSVC16(args, packages, args.msvc_version, "10.0.18362", "14.28", defaultPackages, defaultIgnores)
+    elif args.msvc_version in (ide("16.9"), "14.28.16.9"):
+        setPackageSelectionMSVC16(args, packages, args.msvc_version, "10.0.19041", "14.28.16.9", defaultPackages, defaultIgnores)
+    elif args.msvc_version in (ide("16.10"), "14.29.16.10"):
+        setPackageSelectionMSVC16(args, packages, args.msvc_version, "10.0.19041", "14.29.16.10", defaultPackages, defaultIgnores)
+    elif args.msvc_version in (ide("16.11"), "14.29.16.11", "14.29"):
+        setPackageSelectionMSVC16(args, packages, args.msvc_version, "10.0.19041", "14.29.16.11", defaultPackages, defaultIgnores)
+    elif args.msvc_version in (ide("17.0"), "14.30.17.0", "14.30"):
+        setPackageSelectionMSVC16(args, packages, args.msvc_version, "10.0.19041", "14.30.17.0", defaultPackages, defaultIgnores)
+    elif args.msvc_version in (ide("17.1"), "14.31.17.1", "14.31"):
+        setPackageSelectionMSVC16(args, packages, args.msvc_version, "10.0.19041", "14.31.17.1", defaultPackages, defaultIgnores)
+    elif args.msvc_version in (ide("17.2"), "14.32.17.2", "14.32"):
+        setPackageSelectionMSVC16(args, packages, args.msvc_version, "10.0.19041", "14.32.17.2", defaultPackages, defaultIgnores)
+    elif args.msvc_version in (ide("17.3"), "14.33.17.3", "14.33"):
+        setPackageSelectionMSVC16(args, packages, args.msvc_version, "10.0.19041", "14.33.17.3", defaultPackages, defaultIgnores)
+    elif args.msvc_version in (ide("17.4"), "14.34.17.4", "14.34"):
+        setPackageSelectionMSVC16(args, packages, args.msvc_version, "10.0.22621", "14.34.17.4", defaultPackages, defaultIgnores)
+    elif args.msvc_version in (ide("17.5"), "14.35.17.5", "14.35"):
+        setPackageSelectionMSVC16(args, packages, args.msvc_version, "10.0.22621", "14.35.17.5", defaultPackages, defaultIgnores)
+    elif args.msvc_version in (ide("17.6"), "14.36.17.6", "14.36"):
+        setPackageSelectionMSVC16(args, packages, args.msvc_version, "10.0.22621", "14.36.17.6", defaultPackages, defaultIgnores)
+    elif args.msvc_version in (ide("17.7"), "14.37.17.7", "14.37"):
+        setPackageSelectionMSVC16(args, packages, args.msvc_version, "10.0.22621", "14.37.17.7", defaultPackages, defaultIgnores)
+    elif args.msvc_version in (ide("17.8"), "14.38.17.8", "14.38"):
+        setPackageSelectionMSVC16(args, packages, args.msvc_version, "10.0.22621", "14.38.17.8", defaultPackages, defaultIgnores)
+    elif args.msvc_version in (ide("17.9"), "14.39.17.9", "14.39"):
+        setPackageSelectionMSVC16(args, packages, args.msvc_version, "10.0.22621", "14.39.17.9", defaultPackages, defaultIgnores)
+    elif args.msvc_version in (ide("17.10"), "14.40.17.10", "14.40"):
+        setPackageSelectionMSVC16(args, packages, args.msvc_version, "10.0.22621", "14.40.17.10", defaultPackages, defaultIgnores)
+    elif args.msvc_version in (ide("17.11"), "14.41.17.11", "14.41"):
+        setPackageSelectionMSVC16(args, packages, args.msvc_version, "10.0.22621", "14.41.17.11", defaultPackages, defaultIgnores)
+    elif args.msvc_version in (ide("17.12"), "14.42.17.12", "14.42"):
+        setPackageSelectionMSVC16(args, packages, args.msvc_version, "10.0.22621", "14.42.17.12", defaultPackages, defaultIgnores)
+    elif args.msvc_version in (ide("17.13"), "14.43.17.13", "14.43"):
+        setPackageSelectionMSVC16(args, packages, args.msvc_version, "10.0.22621", "14.43.17.13", defaultPackages, defaultIgnores)
+    elif args.msvc_version in (ide("17.14"), "14.44.17.14", "14.44"):
+        setPackageSelectionMSVC16(args, packages, args.msvc_version, "10.0.26100", "14.44.17.14", defaultPackages, defaultIgnores)
+    elif args.msvc_version in (ide("18.0"), "14.50.18.0", "14.50"):
+        setPackageSelectionMSVC16(args, packages, args.msvc_version, "10.0.26100", "14.50.18.0", defaultPackages, defaultIgnores)
+    elif args.msvc_version == "14.51":
+        setPackageSelectionMSVC16(args, packages, args.msvc_version, "10.0.26100", "14.51", defaultPackages, defaultIgnores)
+    elif args.msvc_version == "14.52":
+        setPackageSelectionMSVC16(args, packages, args.msvc_version, "10.0.26100", "14.52", defaultPackages, defaultIgnores)
+
+    elif args.msvc_version in (ide("15.4"), "14.11"):
+        setPackageSelectionMSVC15(args, packages, args.msvc_version, "10.0.16299", "14.11", defaultPackages, defaultIgnores)
+    elif args.msvc_version in (ide("15.5"), "14.12"):
+        setPackageSelectionMSVC15(args, packages, args.msvc_version, "10.0.16299", "14.12", defaultPackages, defaultIgnores)
+    elif args.msvc_version in (ide("15.6"), "14.13"):
+        setPackageSelectionMSVC15(args, packages, args.msvc_version, "10.0.16299", "14.13", defaultPackages, defaultIgnores)
+    elif args.msvc_version in (ide("15.7"), "14.14"):
+        setPackageSelectionMSVC15(args, packages, args.msvc_version, "10.0.17134", "14.14", defaultPackages, defaultIgnores)
+    elif args.msvc_version in (ide("15.8"), "14.15"):
+        setPackageSelectionMSVC15(args, packages, args.msvc_version, "10.0.17134", "14.15", defaultPackages, defaultIgnores)
+    elif args.msvc_version in (ide("15.9"), "14.16"):
+        setPackageSelectionMSVC15(args, packages, args.msvc_version, "10.0.17763", "14.16", defaultPackages, defaultIgnores)
+    else:
+        print("Unsupported MSVC Build Tools version " + args.msvc_version)
+        sys.exit(1)
+
+    if args.with_msvc:
+        
+        
+        
+        
+        args.package.append("Microsoft.VisualCpp.Servicing.Redist")
+
+    if args.with_sdk is None:
+        pass
+    elif not args.with_sdk:
+        for key in packages:
+            if key.startswith("win10sdk") or key.startswith("win11sdk"):
+                args.ignore.append(key)
+    elif args.sdk_version is None:
+        
+        
+        package = args.package
+        include_optional = args.include_optional
+        skip_recommended = args.skip_recommended
+
+        args.package = ["Microsoft.VisualStudio.Workload.VCTools"]
+        args.include_optional = False
+        args.skip_recommended = False
+
+        recommended = getSelectedPackages(packages, args)
+
+        args.package = package
+        args.include_optional = include_optional
+        args.skip_recommended = skip_recommended
+
+        for p in recommended:
+            key = p["id"].lower()
+            if key.startswith("win10sdk") or key.startswith("win11sdk"):
+                args.package.append(key)
+    else:
+        found = False
+        versions = []
+        for key in packages:
+            if key.startswith("win10sdk") or key.startswith("win11sdk"):
+                base = key[0:8]
+                version = key[9:]
+                if re.match(r'\d+\.\d+\.\d+', version):
+                    versions += [version]
+                sdkname = base + "_" + args.sdk_version
+                if key == sdkname:
+                    found = True
+                    args.package.append(key)
+                else:
+                    args.ignore.append(key)
+        if not found:
+            print("WinSDK version " + args.sdk_version + " not found")
+            print("Available versions:")
+            for v in sorted(versions):
+                print("    " + v)
+            sys.exit(1)
+
+    appendPackageSelection(args, args.with_dia, "Microsoft.VisualCpp.DIA.SDK")
+    appendPackageSelection(args, args.with_msbuild, "Microsoft.Build")
+    appendPackageSelection(args, args.with_msbuild, "Microsoft.Build.Dependencies")
+    appendPackageSelection(args, args.with_devcmd, "Microsoft.VisualCpp.Tools.Core.x86")
+    appendPackageSelection(args, args.with_devcmd, "Microsoft.VisualStudio.VC.vcvars")
+    appendPackageSelection(args, args.with_devcmd, "Microsoft.VisualStudio.PackageGroup.VsDevCmd")
+    appendPackageSelection(args, args.with_workload, "Microsoft.VisualStudio.Workload.VCTools")
+    appendPackageSelection(args, args.with_llvm, "Microsoft.VisualStudio.VC.Llvm.Clang")
+    appendPackageSelection(args, args.with_llvm, "Microsoft.VisualStudio.VC.MSBuild.Llvm")
+
+    if args.with_wdk_installers is not None:
+        args.package.append("Component.Microsoft.Windows.DriverKit.BuildTools")
+
+def lowercaseIgnores(args):
+    ignore = []
+    if args.ignore != None:
+        for i in args.ignore:
+            ignore.append(i.lower())
+    args.ignore = ignore
+
+def getManifest(args):
+    if args.manifest == None:
+        if args.major < 18:
+            type = "release"
+        else:
+            type = "stable"
+        if args.preview:
+            if args.major < 18:
+                type = "pre"
+            else:
+                type = "insiders"
+        url = "https://aka.ms/vs/%s/%s/channel" % (args.major, type)
+        print("Fetching %s" % (url))
+        manifest = json.loads(urllib.request.urlopen(url).read())
+        print("Got toplevel manifest for %s" % (manifest["info"]["productDisplayVersion"]))
+        for item in manifest["channelItems"]:
+            if "type" in item and item["type"] == "Manifest":
+                args.manifest = item["payloads"][0]["url"]
+        if args.manifest == None:
+            print("Unable to find an intaller manifest!")
+            sys.exit(1)
+
+    if not args.manifest.startswith("http"):
+        args.manifest = "file:" + args.manifest
+
+    manifestdata = urllib.request.urlopen(args.manifest).read()
+    manifest = json.loads(manifestdata)
+    print("Loaded installer manifest for %s" % (manifest["info"]["productDisplayVersion"]))
+
+    if args.save_manifest:
+        filename = "%s.manifest" % (manifest["info"]["productDisplayVersion"])
+        if os.path.isfile(filename):
+            oldfile = open(filename, "rb").read()
+            if oldfile != manifestdata:
+                print("Old saved manifest in \"%s\" differs from newly downloaded one, not overwriting!" % (filename))
+            else:
+                print("Old saved manifest in \"%s\" is still current" % (filename))
+        else:
+            f = open(filename, "wb")
+            f.write(manifestdata)
+            f.close()
+            print("Saved installer manifest to \"%s\"" % (filename))
+
+    return manifest
+
+def prioritizePackage(arch, language, a, b):
+    def archOrd(k, x):
+        if arch is None:
+            return 0
+        c = x.get(k, "neutral").lower()
+        if c == "neutral":
+            return 0
+        if c == arch:
+            return -1
+        return 1
+
+    for k in ["chip", "machineArch", "productArch"]:
+        r = archOrd(k, a) - archOrd(k, b)
+        if r != 0:
+            return r
+
+    lang = language.lower()
+    countrylang = "-" in lang
+    alangpriority = 0
+    blangpriority = 0
+    if "language" in a:
+        alang = a["language"].lower()
+        if (countrylang and alang == lang) or (not countrylang and alang.startswith(lang + "-")):
+            alangpriority = 2
+        elif alang.startswith("en-"):
+            alangpriority = 1
+    if "language" in b:
+        blang = b["language"].lower()
+        if (countrylang and blang == lang) or (not countrylang and blang.startswith(lang + "-")):
+            blangpriority = 2
+        elif blang.startswith("en-"):
+            blangpriority = 1
+    if alangpriority > blangpriority:
+        return -1
+    if alangpriority < blangpriority:
+        return 1
+    return 0
+
+def getPackages(manifest, arch, language="en"):
+    packages = {}
+    for p in manifest["packages"]:
+        id = p["id"].lower()
+        if not id in packages:
+            packages[id] = []
+        packages[id].append(p)
+    for key in packages:
+        packages[key] = sorted(packages[key], key=functools.cmp_to_key(functools.partial(prioritizePackage, arch, language)))
+    return packages
+
+def listPackageType(packages, type):
+    if type != None:
+        type = type.lower()
+    ids = []
+    for key in packages:
+        p = packages[key][0]
+        if type == None:
+            ids.append(p["id"])
+        elif "type" in p and p["type"].lower() == type:
+            ids.append(p["id"])
+    for id in sorted(ids):
+        print(id)
+
+def findPackage(packages, id, constraints={}, warn=True):
+    origid = id
+    id = id.lower()
+    candidates = None
+    if not id in packages:
+        if warn:
+            print("WARNING: %s not found" % (origid))
+        return None
+    candidates = packages[id]
+    for a in candidates:
+        matched = True
+        for k, v in constraints.items():
+            if k in ["chip", "machineArch"]:
+                matched = a.get(k, "").lower() == v.lower()
+                if not matched:
+                    break
+        if matched:
+            return a
+    return candidates[0]
+
+def matchPackageHostArch(p, host):
+    if host is None:
+        return True
+
+    known_archs = ["x86", "x64", "arm64"]
+
+    
+    
+    
+    id = p["id"].lower()
+    for a in known_archs:
+        if "host" + a in id:
+            return a == host
+
+    for k in ["chip", "machineArch", "productArch"]:
+        a = p.get(k, "neutral").lower()
+        if a == "neutral":
+            continue
+        if a != host:
+            return False
+
+    return True
+
+def matchPackageTargetArch(p, archs):
+    if archs is None:
+        return True
+
+    known_archs = ["x86", "x64", "arm", "arm64"]
+
+    
+    
+    
+    id = p["id"].lower()
+    for a in known_archs:
+        if re.search(fr"\.target{a}(\W|$)", id):
+            return a in archs
+
+    return True
+
+def printDepends(packages, target, constraints, indent, args):
+    chipstr = ""
+    for k in ["chip", "machineArch"]:
+        v = constraints.get(k)
+        if v is not None:
+            chipstr = chipstr + " (" + k + "." + v + ")"
+    deptypestr = ""
+    deptype = constraints.get("type", "")
+    if deptype != "":
+        deptypestr = " (" + deptype + ")"
+    ignorestr = ""
+    ignore = False
+    if target.lower() in args.ignore:
+        ignorestr = " (Ignored)"
+        ignore = True
+    if deptype == "Optional" and not args.include_optional:
+        ignore = True
+    if deptype == "Recommended" and args.skip_recommended:
+        ignore = True
+    if not ignore:
+        p = findPackage(packages, target, constraints, warn=False)
+        if p == None:
+            ignorestr = " (NotFound)"
+            ignore = True
+        elif args.only_host and not matchPackageHostArch(p, args.host_arch):
+            ignorestr = " (HostArchMismatch)"
+            ignore = True
+        elif not matchPackageTargetArch(p, args.architecture):
+            ignorestr = " (TargetArchMismatch)"
+            ignore = True
+    print(indent + target + chipstr + deptypestr + ignorestr)
+    if ignore:
+        return
+    for target, constraints in p.get("dependencies", {}).items():
+        if not isinstance(constraints, dict):
+            constraints = { "version": constraints }
+        target = constraints.get("id", target)
+        printDepends(packages, target, constraints, indent + "  ", args)
+
+def printReverseDepends(packages, target, deptype, indent, args):
+    deptypestr = ""
+    if deptype != "":
+        deptypestr = " (" + deptype + ")"
+    print(indent + target + deptypestr)
+    if deptype == "Optional" and not args.include_optional:
+        return
+    if deptype == "Recommended" and args.skip_recommended:
+        return
+    target = target.lower()
+    for key in packages:
+        p = packages[key][0]
+        if "dependencies" in p:
+            deps = p["dependencies"]
+            for k in deps:
+                if k.lower() != target:
+                    continue
+                dep = deps[k]
+                type = ""
+                if "type" in dep:
+                    type = dep["type"]
+                printReverseDepends(packages, p["id"], type, indent + "  ", args)
+
+def getPackageKey(p):
+    packagekey = p["id"]
+    if "version" in p:
+        packagekey = packagekey + "-" + p["version"]
+    for k in ["chip", "machineArch", "productArch"]:
+        v = p.get(k)
+        if v is not None:
+           packagekey = packagekey + "-" + k + "." + v
+    return packagekey
+
+def aggregateDepends(packages, included, target, constraints, args):
+    if target.lower() in args.ignore:
+        return []
+    p = findPackage(packages, target, constraints)
+    if p == None:
+        return []
+    if args.only_host and not matchPackageHostArch(p, args.host_arch):
+        return []
+    if not matchPackageTargetArch(p, args.architecture):
+        return []
+    packagekey = getPackageKey(p)
+    if packagekey in included:
+        return []
+    ret = [p]
+    included[packagekey] = True
+    for target, constraints in p.get("dependencies", {}).items():
+        if not isinstance(constraints, dict):
+            constraints = { "version": constraints }
+        target = constraints.get("id", target)
+        deptype = constraints.get("type")
+        if deptype == "Optional" and not args.include_optional:
+            continue
+        if deptype == "Recommended" and args.skip_recommended:
+            continue
+        ret.extend(aggregateDepends(packages, included, target, constraints, args))
+    return ret
+
+def getSelectedPackages(packages, args):
+    ret = []
+    included = {}
+    for i in args.package:
+        ret.extend(aggregateDepends(packages, included, i, {}, args))
+    return ret
+
+def verifySelectedPackages(packages, file):
+    class Result:
+        def __init__(self, pattern, op, expected):
+            self.pattern = pattern
+            
+            self.re = re.compile(pattern.replace(".", "\\."), re.IGNORECASE)
+            self.matches = []
+            self.op = ">" if op is None else op
+            self.expected = 0 if expected is None else int(expected)
+
+    results = []
+    with sys.stdin if file == "-" else open(file, "r") as f:
+        for line in f:
+            line = line.strip()
+            if line == "" or line.startswith("#"):
+                continue
+            m = re.fullmatch(r"(\S+)(\s+(<|<=|>|>=|=)(\d+))?", line)
+            if m is None:
+                raise Exception(f"Invalid line in verification file: {line}")
+            results.append(Result(m.group(1), m.group(3), m.group(4)))
+
+    for p in packages:
+        id = p["id"]
+        for r in results:
+            if r.re.fullmatch(id):
+                r.matches.append(id)
+
+    fail = False
+    for r in results:
+        count = len(r.matches)
+        if r.op == ">" and not count > r.expected or\
+            r.op == ">=" and not count >= r.expected or\
+            r.op == "<" and not count < r.expected or\
+            r.op == "<=" and not count <= r.expected or\
+            r.op == "=" and not count == r.expected:
+            fail = True
+            print(f"Verification failed: {r.pattern} {r.op}{r.expected} ({count})")
+            for p in sorted(r.matches):
+                print("    " + p)
+    return not fail
+
+def sumInstalledSize(l):
+    sum = 0
+    for p in l:
+        if "installSizes" in p:
+            sizes = p["installSizes"]
+            for location in sizes:
+                sum = sum + sizes[location]
+    return sum
+
+def sumDownloadSize(l):
+    sum = 0
+    for p in l:
+        if "payloads" in p:
+            for payload in p["payloads"]:
+                if "size" in payload:
+                    sum = sum + payload["size"]
+    return sum
+
+def formatSize(s):
+    if s > 900*1024*1024:
+        return "%.1f GB" % (s/(1024*1024*1024))
+    if s > 900*1024:
+        return "%.1f MB" % (s/(1024*1024))
+    if s > 1024:
+        return "%.1f KB" % (s/1024)
+    return "%d bytes" % (s)
+
+def printPackageList(l):
+    for p in sorted(l, key=lambda p: p["id"]):
+        s = p["id"]
+        if "type" in p:
+            s = s + " (" + p["type"] + ")"
+        for k in ["version", "chip", "machineArch", "productArch"]:
+            v = p.get(k)
+            if v is not None:
+                s = s + " (" + k + "." + v + ")"
+        if "language" in p:
+            s = s + " (" + p["language"] + ")"
+        s = s + " " + formatSize(sumInstalledSize([p]))
+        print(s)
+
+def makedirs(dir):
+    try:
+        os.makedirs(dir)
+    except OSError:
+        pass
+
+def sha256File(file):
+    sha256Hash = hashlib.sha256()
+    with open(file, "rb") as f:
+        for byteBlock in iter(lambda: f.read(4096), b""):
+                sha256Hash.update(byteBlock)
+        return sha256Hash.hexdigest()
+
+def getPayloadName(payload):
+    name = payload["fileName"]
+    if "\\" in name:
+        name = name.split("\\")[-1]
+    if "/" in name:
+        name = name.split("/")[-1]
+    return name
+
+def downloadPackages(selected, cache, allowHashMismatch = False):
+    pool = multiprocessing.Pool(5)
+    tasks = []
+    makedirs(cache)
+    for p in selected:
+        if not "payloads" in p:
+            continue
+        dir = os.path.join(cache, getPackageKey(p))
+        makedirs(dir)
+        for payload in p["payloads"]:
+            name = getPayloadName(payload)
+            destname = os.path.join(dir, name)
+            fileid = os.path.join(getPackageKey(p), name)
+            args = (payload, destname, fileid, allowHashMismatch)
+            tasks.append(pool.apply_async(_downloadPayload, args))
+
+    downloaded = sum(task.get() for task in tasks)
+    pool.close()
+    print("Downloaded %s in total" % (formatSize(downloaded)))
+
+def _downloadPayload(payload, destname, fileid, allowHashMismatch):
+    attempts = 5
+    for attempt in range(attempts):
+        try:
+            if os.access(destname, os.F_OK):
+                if "sha256" in payload:
+                    if sha256File(destname).lower() != payload["sha256"].lower():
+                        print("Incorrect existing file %s, removing" % (fileid), flush=True)
+                        os.remove(destname)
+                    else:
+                        print("Using existing file %s" % (fileid), flush=True)
+                        return 0
+                else:
+                    return 0
+            size = 0
+            if "size" in payload:
+                size = payload["size"]
+            print("Downloading %s (%s)" % (fileid, formatSize(size)), flush=True)
+            urllib.request.urlretrieve(payload["url"], destname)
+            if "sha256" in payload:
+                if sha256File(destname).lower() != payload["sha256"].lower():
+                    if allowHashMismatch:
+                        print("WARNING: Incorrect hash for downloaded file %s" % (fileid), flush=True)
+                    else:
+                        raise Exception("Incorrect hash for downloaded file %s, aborting" % fileid)
+            return size
+        except Exception as e:
+            if attempt == attempts - 1:
+                raise
+            print("%s: %s" % (type(e).__name__, e), flush=True)
+
+def mergeTrees(src, dest):
+    if not os.path.isdir(src):
+        return
+    if not os.path.isdir(dest):
+        shutil.move(src, dest)
+        return
+    names = os.listdir(src)
+    destnames = {}
+    for n in os.listdir(dest):
+        destnames[n.lower()] = n
+    for n in names:
+        srcname = os.path.join(src, n)
+        destname = os.path.join(dest, n)
+        if os.path.isdir(srcname):
+            if os.path.isdir(destname):
+                mergeTrees(srcname, destname)
+            elif n.lower() in destnames:
+                mergeTrees(srcname, os.path.join(dest, destnames[n.lower()]))
+            else:
+                shutil.move(srcname, destname)
+        else:
+            shutil.move(srcname, destname)
+
+def unzipFiltered(zip, dest):
+    tmp = os.path.join(dest, "extract")
+    for f in zip.infolist():
+        name = urllib.parse.unquote(f.filename)
+        if "/" in name:
+            sep = name.rfind("/")
+            dir = os.path.join(dest, name[0:sep])
+            makedirs(dir)
+        extracted = zip.extract(f, tmp)
+        shutil.move(extracted, os.path.join(dest, name))
+    shutil.rmtree(tmp)
+
+def unpackVsix(file, dest, listing):
+    temp = os.path.join(dest, "vsix")
+    makedirs(temp)
+    with zipfile.ZipFile(file, "r") as zip:
+        unzipFiltered(zip, temp)
+        with open(listing, "w") as f:
+            for n in zip.namelist():
+                f.write(n + "\n")
+    contents = os.path.join(temp, "Contents")
+    if os.access(contents, os.F_OK):
+        mergeTrees(contents, dest)
+    
+    msbuild = os.path.join(temp, "$MSBuild")
+    if os.access(msbuild, os.F_OK):
+        mergeTrees(msbuild, os.path.join(dest, "MSBuild"))
+    shutil.rmtree(temp)
+
+def unpackWin10SDK(src, payloads, dest):
+    
+    
+    if os.environ.get("TH09_MINIMAL_SDK") == "1":
+        required = {
+            "Windows SDK Desktop Headers x86-x86_en-us.msi",
+            "Windows SDK Desktop Libs x86-x86_en-us.msi",
+            "Windows SDK for Windows Store Apps Headers-x86_en-us.msi",
+            "Windows SDK for Windows Store Apps Libs-x86_en-us.msi",
+            "Universal CRT Headers Libraries and Sources-x86_en-us.msi",
+        }
+        payloads = [p for p in payloads if getPayloadName(p) in required]
+    
+    
+    
+    
+    
+    
+    if sys.platform != "win32" and not os.access(os.path.join(dest, "Program Files"), os.F_OK):
+        os.symlink(".", os.path.join(dest, "Program Files"), target_is_directory=True)
+
+    for payload in payloads:
+        name = getPayloadName(payload)
+        if name.endswith(".msi"):
+            print("Extracting " + name)
+            srcfile = os.path.join(src, name)
+            if sys.platform == "win32":
+                
+                cmd = "msiexec /a \"%s\" /qn TARGETDIR=\"%s\"" % (srcfile, os.path.abspath(dest))
+            else:
+                cmd = ["msiextract", "-C", dest, srcfile]
+            with open(os.path.join(dest, "WinSDK-" + getPayloadName(payload) + "-listing.txt"), "w") as log:
+                subprocess.check_call(cmd, stdout=log)
+
+def unpackWin10WDK(src, dest):
+    print("Unpacking WDK installers from", src)
+
+    
+    
+    for srcfile in glob.glob(src + "/Windows Driver*.msi"):
+        name = os.path.basename(srcfile)
+        print("Extracting", name)
+
+        
+        
+        cmd = ["msiextract", "-C", dest, srcfile]
+
+        payloadName, _ = os.path.splitext(name)
+        with open(os.path.join(dest, "WDK-" + payloadName + "-listing.txt"), "w") as log:
+            subprocess.check_call(cmd, stdout=log)
+
+    
+    for vsix in glob.glob(dest + "/**/WDK.vsix", recursive=True):
+        name = os.path.basename(vsix)
+        print("Unpacking WDK VS extension", name)
+
+        payloadName, _ = os.path.splitext(name)
+        listing = os.path.join(dest, "WDK-VS-" + payloadName + "-listing.txt")
+        unpackVsix(vsix, dest, listing)
+
+    
+    
+    kitsPath = os.path.join(dest, "Program Files", "Windows Kits", "10")
+    brokenBuildDir = os.path.join(kitsPath, "Build")
+    for buildDir in glob.glob(kitsPath + "/build/10.*/"):
+        wdkVersion = buildDir.split("/")[-2];
+        print("Merging WDK 'Build' and 'build' directories into version", wdkVersion);
+        mergeTrees(brokenBuildDir, buildDir)
+    shutil.rmtree(brokenBuildDir)
+
+    
+    propsPath = os.path.join(kitsPath, "DesignTime", "CommonConfiguration", "Neutral", "WDK");
+    versionedPath = os.path.join(propsPath, wdkVersion)
+    makedirs(versionedPath)
+    for props in glob.glob(propsPath + "/*.props"):
+        filename = os.path.basename(props)
+        print("Moving", filename, "into version", wdkVersion);
+        shutil.move(props, os.path.join(versionedPath, filename))
+
+def extractPackages(selected, cache, dest):
+    makedirs(dest)
+    
+    
+    makedirs(os.path.join(dest, "MSBuild"))
+    for p in selected:
+        type = p["type"]
+        dir = os.path.join(cache, getPackageKey(p))
+        if type == "Component" or type == "Workload" or type == "Group":
+            continue
+        if type == "Vsix":
+            print("Unpacking " + p["id"])
+            for payload in p["payloads"]:
+                unpackVsix(os.path.join(dir, getPayloadName(payload)), dest, os.path.join(dest, getPackageKey(p) + "-listing.txt"))
+        elif p["id"].startswith("Win10SDK") or p["id"].startswith("Win11SDK"):
+            print("Unpacking " + p["id"])
+            unpackWin10SDK(dir, p["payloads"], dest)
+        else:
+            print("Skipping unpacking of " + p["id"] + " of type " + type)
+
+def patchPackages(dest):
+    patches = os.path.join(os.path.dirname(os.path.abspath(__file__)), "patches")
+    if not os.path.isdir(patches):
+        return
+    for patch in glob.iglob(os.path.join(patches, "**"), recursive=True):
+        if os.path.isdir(patch):
+            continue
+        p = os.path.relpath(patch, patches)
+        f, op = os.path.splitext(p)
+        if op == ".patch":
+            if os.access(os.path.join(dest, f), os.F_OK):
+                
+                if subprocess.call(["git", "--work-tree=.", "apply", "--quiet", "--reverse", "--check", patch], cwd=dest) != 0:
+                    print("Patching " + f)
+                    subprocess.check_call(["git", "--work-tree=.", "apply", patch], cwd=dest)
+        elif op == ".remove":
+            if os.access(os.path.join(dest, f), os.F_OK):
+                print("Removing " + f)
+                os.remove(os.path.join(dest, f))
+        else:
+            print("Copying " + p)
+            os.makedirs(os.path.dirname(os.path.join(dest, p)), exist_ok=True)
+            shutil.copyfile(patch, os.path.join(dest, p))
+
+def mergeSharedAssemblies(root, config, app, overwrite):
+
+
+
+
+
+
+
+
+
+    if os.path.isfile(app + ".config"):
+        return
+    if not os.path.isfile(app + ".config.template"):
+        return
+
+    shared_assemblies_config_path = os.path.join(root, "SharedAssemblies", "Configs", config + ".csv")
+    if not os.path.isfile(shared_assemblies_config_path):
+        return
+
+    ns = "{urn:schemas-microsoft-com:asm.v1}"
+    configuration = ET.parse(app + ".config.template")
+
+    assemblyBinding = configuration.getroot()
+    for tag in ["runtime", f"{ns}assemblyBinding"]:
+        child = assemblyBinding.find(tag)
+        if child is None:
+            child = ET.SubElement(assemblyBinding, tag)
+        assemblyBinding = child
+
+    deps = {}
+    for dependentAssembly in configuration.findall(f"./runtime/{ns}assemblyBinding/{ns}dependentAssembly"):
+        assemblyIdentity = dependentAssembly.find(f"{ns}assemblyIdentity")
+        if assemblyIdentity is not None:
+            deps[assemblyIdentity.get("name")] = dependentAssembly
+
+    num_of_overwrites = 0
+    with open(shared_assemblies_config_path, newline="") as file,\
+         open(os.path.join(root, f"merge-shared-assemblies-{os.path.relpath(app, root).replace(os.path.sep, '-')}.log"), "w") as log:
+        reader = csv.DictReader(file)
+        print(f"INFO: Opened group config '{config}'.", file=log)
+        print(f"INFO: Headers for '{config}': {','.join(reader.fieldnames)}", file=log)
+
+        for row in reader:
+            name = row["name"]
+            dependentAssembly = deps.get(name)
+            if dependentAssembly is None:
+                dependentAssembly = ET.SubElement(assemblyBinding, f"{ns}dependentAssembly")
+                print(f"INFO: Assembly '{name}' redirect will be generated.", file=log)
+            elif not overwrite:
+                print(f"ERROR: Assembly '{name}' already exists. Overlap with existing redirect.", file=log)
+                num_of_overwrites += 1
+                continue
+            else:
+                dependentAssembly.clear()
+                num_of_overwrites += 1
+                print(f"INFO: Assembly '{name}' already exists. Will overwrite existing redirect.", file=log)
+
+            ET.SubElement(dependentAssembly, f"{ns}assemblyIdentity", {
+                "name": row["name"],
+                "culture": row["culture"],
+                "publicKeyToken": row["publickeytoken"],
+            })
+            ET.SubElement(dependentAssembly, f"{ns}bindingRedirect", {
+                "oldVersion": row["oldVersion"] + "-" + row["newVersion"],
+                "newVersion": row["newVersion"],
+            })
+            ET.SubElement(dependentAssembly, f"{ns}codeBase", {
+                "version": row["version"],
+                "href": os.path.relpath(
+                    os.path.join(os.path.dirname(shared_assemblies_config_path), row["href"].replace("\\", "/")),
+                    os.path.dirname(app)).replace("/", "\\")
+            })
+
+        if not overwrite and num_of_overwrites > 0:
+            print(f"ERROR: Result: Failure.", file=log)
+            return
+        if num_of_overwrites > 0:
+            print(f"INFO: Removed {num_of_overwrites} overlapping dependentAssembly entries.", file=log)
+        print(f"INFO: Result: Success.", file=log)
+
+    if sys.platform != "win32" and ET.__name__ == "xml.etree.ElementTree":
+        
+        
+        
+        
+        
+        
+        
+        
+        ET.register_namespace("x", ns[1:-1])
+        content = ET.tostring(configuration.getroot(), encoding="unicode", xml_declaration=True)
+        content = re.sub("<configuration[^>]*>", "<configuration>", content)
+        content = re.sub("<runtime>", f"<runtime xmlns:x=\"{ns[1:-1]}\">", content)
+        with open(app + ".config", "w", encoding="utf-8") as file:
+            file.write(content)
+    else:
+        configuration.write(app + ".config", encoding="utf-8", xml_declaration=True)
+
+def copyDependentAssemblies(app):
+    if not os.path.isfile(app + ".config"):
+        return
+    dest = os.path.dirname(app)
+    ns = "{urn:schemas-microsoft-com:asm.v1}"
+    configuration = ET.parse(app + ".config")
+    for codeBase in configuration.findall(f"./runtime/{ns}assemblyBinding/{ns}dependentAssembly/{ns}codeBase/[@href]"):
+        href = codeBase.attrib["href"].replace("\\", "/")
+        src = os.path.join(dest, href)
+        if os.path.isfile(src):
+            shutil.copy(src, dest)
+
+def moveVCSDK(unpack, dest):
+    
+    
+    components = [
+        "VC",
+        "Windows Kits",
+        
+        
+        "DIA SDK",
+        
+        "MSBuild",
+        "SharedAssemblies",
+        
+        
+        
+        os.path.join("Common7", "Tools"),
+    ]
+    for dir in filter(None, components):
+        mergeTrees(os.path.join(unpack, dir), os.path.join(dest, dir))
+
+if __name__ == "__main__":
+    parser = getArgsParser()
+    args = parser.parse_args()
+
+    socket.setdefaulttimeout(15)
+
+    if args.host_arch is None:
+        args.host_arch = platform.machine().lower()
+        if platform.system() == "Darwin":
+            
+            args.host_arch = "x64"
+        elif args.host_arch in ["x86", "i386", "i686"]:
+            args.host_arch = "x86"
+        elif args.host_arch in ["x64", "x86_64", "amd64"]:
+            args.host_arch = "x64"
+        elif args.host_arch in ["arm64", "aarch64"]:
+            args.host_arch = "arm64"
+        else:
+            args.host_arch = None
+
+    if args.host_arch is None:
+        print("WARNING: Unable to detect host architecture")
+    else:
+        print("Install packages for %s host architecture" % args.host_arch)
+
+    packages = getPackages(getManifest(args), args.host_arch, args.language)
+
+    if args.print_version:
+        sys.exit(0)
+
+    if not args.accept_license:
+        response = input("Do you accept the license at " + findPackage(packages, "Microsoft.VisualStudio.Product.BuildTools")["localizedResources"][0]["license"] + " (yes/no)? ")
+        while response != "yes" and response != "no":
+            response = input("Do you accept the license? Answer \"yes\" or \"no\": ")
+        if response == "no":
+            sys.exit(0)
+
+    if args.list_components or args.list_workloads or args.list_packages:
+        if args.list_components:
+            listPackageType(packages, "Component")
+        if args.list_workloads:
+            listPackageType(packages, "Workload")
+        if args.list_packages:
+            listPackageType(packages, None)
+        sys.exit(0)
+
+    setPackageSelection(args, packages)
+    lowercaseIgnores(args)
+
+    if args.print_deps_tree:
+        for i in args.package:
+            printDepends(packages, i, {}, "", args)
+        sys.exit(0)
+
+    if args.print_reverse_deps:
+        for i in args.package:
+            printReverseDepends(packages, i, "", "", args)
+        sys.exit(0)
+
+    selected = getSelectedPackages(packages, args)
+
+    if args.print_selection:
+        printPackageList(selected)
+
+    if args.verify_selection is not None:
+        if verifySelectedPackages(selected, args.verify_selection):
+            sys.exit(0)
+        else:
+            sys.exit(1)
+
+    print("Selected %d packages, for a total download size of %s, install size of %s" % (len(selected), formatSize(sumDownloadSize(selected)), formatSize(sumInstalledSize(selected))))
+
+    if args.print_selection:
+        sys.exit(0)
+
+    tempcache = None
+    if args.cache != None:
+        cache = os.path.abspath(args.cache)
+    else:
+        cache = tempfile.mkdtemp(prefix="vsinstall-")
+        tempcache = cache
+
+    if not args.only_download and args.dest == None:
+        print("No destination directory set!")
+        sys.exit(1)
+
+    try:
+        downloadPackages(selected, cache, allowHashMismatch=args.only_download)
+        if args.only_download:
+            sys.exit(0)
+
+        dest = os.path.abspath(args.dest)
+
+        if args.only_unpack:
+            unpack = dest
+        else:
+            unpack = os.path.join(dest, "unpack")
+
+        extractPackages(selected, cache, unpack)
+
+        if args.with_wdk_installers is not None:
+            unpackWin10WDK(args.with_wdk_installers, unpack)
+
+        if args.only_host:
+            if args.host_arch in ["x64", "arm64"]:
+                shutil.rmtree(os.path.join(unpack, "VC", "Tools", "Llvm", "bin"), ignore_errors=True)
+                shutil.rmtree(os.path.join(unpack, "VC", "Tools", "Llvm", "lib"), ignore_errors=True)
+            if args.host_arch in ["x86", "x64"]:
+                shutil.rmtree(os.path.join(unpack, "VC", "Tools", "Llvm", "ARM64"), ignore_errors=True)
+            if args.host_arch in ["x86", "arm64"]:
+                shutil.rmtree(os.path.join(unpack, "VC", "Tools", "Llvm", "x64"), ignore_errors=True)
+
+        mergeSharedAssemblies(unpack, "devenv", os.path.join(unpack, "MSBuild", "Current", "Bin", "MSBuild.exe"), True)
+        mergeSharedAssemblies(unpack, "devenv", os.path.join(unpack, "MSBuild", "Current", "Bin", "amd64", "MSBuild.exe"), True)
+        mergeSharedAssemblies(unpack, "devenv", os.path.join(unpack, "MSBuild", "Current", "Bin", "arm64", "MSBuild.exe"), True)
+
+        if sys.platform != "win32":
+            
+            
+            copyDependentAssemblies(os.path.join(unpack, "MSBuild", "Current", "Bin", "MSBuild.exe"))
+            copyDependentAssemblies(os.path.join(unpack, "MSBuild", "Current", "Bin", "amd64", "MSBuild.exe"))
+            copyDependentAssemblies(os.path.join(unpack, "MSBuild", "Current", "Bin", "arm64", "MSBuild.exe"))
+
+        if not args.only_unpack:
+            moveVCSDK(unpack, dest)
+            if not args.keep_unpack:
+                shutil.rmtree(unpack)
+            if not args.skip_patch and args.major == 18: 
+                patchPackages(dest)
+    finally:
+        if tempcache != None:
+            shutil.rmtree(tempcache)

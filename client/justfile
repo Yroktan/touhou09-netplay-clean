@@ -1,0 +1,7 @@
+import 'tools/common.just'
+
+
+
+
+natural N="10": exe
+    python3 scripts/natural_link.py {{N}}

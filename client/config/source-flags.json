@@ -1,0 +1,37 @@
+{
+  "src/effect.cpp": [
+    "-/GX"
+  ],
+  "src/gamemanager.cpp": [
+    "-/O2",
+    "-/Ob0",
+    "/O1",
+    "/Ob1",
+    "/Oi"
+  ],
+  "src/mainmenu.cpp": [
+    "-/O2",
+    "-/Ob0",
+    "/O1",
+    "/Ob1"
+  ],
+  "src/midi.cpp": [
+    "-/GX"
+  ],
+  "src/NetManager.cpp": [
+    "-/O2",
+    "/O1"
+  ],
+  "src/network.cpp": [
+    "/Ob1"
+  ],
+  "src/replay.cpp": [
+    "-/GX"
+  ],
+  "src/screeneffect.cpp": [
+    "-/GX"
+  ],
+  "src/dll/dllmain.cpp": [
+    "-/GS"
+  ]
+}
