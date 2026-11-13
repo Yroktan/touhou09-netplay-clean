@@ -18,7 +18,6 @@ Enemy *EnemyManager::Spawn(int sub, D3DXVECTOR3 *pos, int life, int itemDrop, in
                                 int usePlayerEcl)
 {
 #ifdef TH09_NATIVE_NETPLAY
-    if (coop::Active() && !coop::Spawning()) return &this->enemies[0x80];
 #endif
     Enemy *enemy;
     int i;
@@ -36,6 +35,9 @@ Enemy *EnemyManager::Spawn(int sub, D3DXVECTOR3 *pos, int life, int itemDrop, in
         if (life >= 0)
         {
             enemy->life = life;
+#ifdef TH09_NATIVE_NETPLAY
+            if(coop::Active() && this->sideIdx==0 && usePlayerEcl && sub==2)enemy->life*=2;
+#endif
         }
         enemy->pos = *pos;
 #ifdef TH09_NATIVE_NETPLAY
@@ -83,7 +85,6 @@ Enemy *EnemyManager::SpawnWithVars(int sub, D3DXVECTOR3 *pos, int life, char ite
                                         EnemyScriptVars *vars, int usePlayerEcl)
 {
 #ifdef TH09_NATIVE_NETPLAY
-    if (coop::Active() && !coop::Spawning()) return &this->enemies[0x80];
 #endif
     Enemy *enemy;
     int i;
@@ -131,7 +132,12 @@ Enemy *EnemyManager::SpawnWithVars(int sub, D3DXVECTOR3 *pos, int life, char ite
         enemy->item = itemDrop;
         if (life >= 0)
         {
-            enemy->life = life;
+            enemy->life =
+#ifdef TH09_NATIVE_NETPLAY
+                coop::BossHealth(enemy,life);
+#else
+                life;
+#endif
         }
         if (score >= 0)
         {
@@ -817,7 +823,6 @@ int EnemyManager::OnUpdate(EnemyManager *mgr)
     mgr->drawListHeads[0] = NULL;
     if (!g_GameManager.gui->unk_1095c
 #ifdef TH09_NATIVE_NETPLAY
-        && !coop::Active()
 #endif
         )
     {

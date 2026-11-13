@@ -203,7 +203,7 @@ void GuiSide::StartUnknownAbcc()
 void Gui::CountRoundWin(int side)
 {
 #ifdef TH09_NATIVE_NETPLAY
-    if (coop::Active()) return;
+    if (coop::SuppressRoundWin(side)) return;
     if (thnet::RouteRoundWin(side)) return;
 #endif
     this->unk_11ea8 = 1;
@@ -1714,7 +1714,6 @@ int GuiSide::OnUpdate(GuiSide *side)
 int GuiSide::OnDraw(GuiSide *side)
 {
 #ifdef TH09_NATIVE_NETPLAY
-    if (coop::Active()) return 1;
 #endif
     int i;
     GameSide *gameSide;

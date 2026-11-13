@@ -31,6 +31,6 @@ The second command builds the separate native Windows client installer at `insta
 
 Launch `game/th09-netplay.exe`. For online play, both players configure the same relay and use the same client version. Create a room on one computer and join it by code on the other; see [PLAYER_GUIDE.md](PLAYER_GUIDE.md).
 
-Confirm a completed co-op battle and duel with both clients before distributing a newly built EXE. Package the client and matching source using [PUBLISHING.md](PUBLISHING.md).
+Confirm both humans share the left field, shoot and damage native enemies; check story transitions and a completed duel with both clients before distributing a newly built EXE. Validate any forced transition checks separately from natural full-campaign completion. Package the client and matching source using [PUBLISHING.md](PUBLISHING.md).
 
 Build and installer entry points also work from paths containing spaces. Native compile inputs use relative paths so developer home directories are not embedded through `__FILE__`.

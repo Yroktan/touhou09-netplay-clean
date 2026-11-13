@@ -2153,7 +2153,12 @@ loop:
 
         case 131:
 
-            enemy->phaseStartLife = enemy->life = enemy->maxLife = INT_ARG(0);
+            enemy->phaseStartLife = enemy->life = enemy->maxLife =
+#ifdef TH09_NATIVE_NETPLAY
+                coop::BossHealth(enemy,INT_ARG(0));
+#else
+                INT_ARG(0);
+#endif
             break;
 
         case 132:
@@ -2161,7 +2166,12 @@ loop:
             break;
 
         case 133:
-            enemy->lifeCallbackLife[INT_ARG(0)] = INT_ARG(1);
+            enemy->lifeCallbackLife[INT_ARG(0)] =
+#ifdef TH09_NATIVE_NETPLAY
+                coop::BossHealth(enemy,INT_ARG(1));
+#else
+                INT_ARG(1);
+#endif
             enemy->lifeCallbackSub[INT_ARG(0)] = INT_ARG(2);
             break;
 
@@ -2438,7 +2448,12 @@ loop:
             break;
 
         case 177:
-            enemy->phaseStartLife = INT_ARG(0);
+            enemy->phaseStartLife =
+#ifdef TH09_NATIVE_NETPLAY
+                coop::BossHealth(enemy,INT_ARG(0));
+#else
+                INT_ARG(0);
+#endif
             break;
 
         case 182:

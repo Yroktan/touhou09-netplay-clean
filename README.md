@@ -1,10 +1,12 @@
-# Touhou 09 Netplay
+# Touhou 09 Netplay v1.2.0
 
-Online duels and cooperative boss battles for Touhou 09 1.50a. The game interface is English.
+Online duels and cooperative story campaigns for Touhou 09 1.50a. The game interface is English.
 
-- **Friends vs Boss:** two players, separate fields, shared boss health and team result.
+- **Story Co-op:** two humans share the left field and play the original nine-stage story campaign. The CPU remains on the right. No boss selection. CPU health is 20 instead of 10; boss projections on the shared field also have doubled health.
 - **Duel 1 vs 1:** first to two wins.
-- **Local Boss Co-op:** two players on one computer with separate controls.
+- **Local Story Co-op:** the same campaign on one computer with separate controls.
+
+Both online players must update to v1.2.0. See [release notes](docs/CHANGELOG.md).
 
 ## Install and play
 
@@ -51,7 +53,7 @@ TH09_RELAY_PORT=10900
 
 ## Русский
 
-Скачайте отдельный **`Touhou09-Netplay-Setup.exe`**, выберите свою Touhou 09 1.50a и укажите домен сервера от владельца. Установщик не требует Python и исходников; настройки сохранятся в `.env`. Затем запускайте `th09-netplay.exe`: **NETPLAY → Friends vs Boss → Create Room**. Другу передайте код; он выбирает **Join Room**. `Install.cmd` в полном исходном пакете остаётся альтернативой.
+Скачайте отдельный **`Touhou09-Netplay-Setup.exe`**, выберите свою Touhou 09 1.50a и укажите домен сервера от владельца. Установщик не требует Python и исходников; настройки сохранятся в `.env`. Затем запускайте `th09-netplay.exe`: **NETPLAY → Story Co-op → Create Room**. Другу передайте код; он выбирает **Join Room**. `Install.cmd` в полном исходном пакете остаётся альтернативой.
 
 ## License
 

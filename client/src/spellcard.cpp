@@ -61,7 +61,6 @@ void SpellCard::Reset()
 void SpellCard::Start(int type, int kind, int unknown, char *name)
 {
 #ifdef TH09_NATIVE_NETPLAY
-    if (coop::Active()) return;
     if (thnet::RouteSpell(this, type, kind, unknown)) return;
 #endif
     int level;

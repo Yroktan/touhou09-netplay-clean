@@ -17,7 +17,7 @@
 namespace thnet {
 static bool active=false, applying=false, forwardingTitle=false, started=false, testStarted=false;
 static bool pauseFlags[2]={false,false};
-static int actorDepth=0, titleCursor=0, lobbyCursor=0, character=0, difficulty=1, mode=0, boss=0;
+static int actorDepth=0, titleCursor=0, lobbyCursor=0, character=0, difficulty=1, mode=0;
 static U32 tick=0, roundStart=0, sentAttacks=0, receivedAttacks=0;
 static U16 roomCode=0, previousRemoteInput=0;
 static unsigned digitsDown=0;
@@ -67,7 +67,7 @@ WaveRandom::~WaveRandom() { if(engaged_) {g_Rng.seed=seed_;g_Rng.generated=gener
 ActorScope::ActorScope() { ++actorDepth; }
 ActorScope::~ActorScope() { --actorDepth; }
 bool Active() { return active && g_NetManager.GetState()==NetManager::Matched; }
-bool RemotePlayer(int side) { return Active() && side!=g_NetManager.Match().role; }
+bool RemotePlayer(int side) { return Active() && !coop::Active() && side!=g_NetManager.Match().role; }
 bool NetworkPaused() { return pauseFlags[0] || pauseFlags[1]; }
 void MarkGame(bool network) {customGame=true;customNetwork=network;}
 bool ConsumeTitleReturn() {
@@ -99,15 +99,14 @@ int TitleUpdate(MainMenu *menu) {
     if(!testStarted && GetEnvironmentVariableA("TH09_NET_AUTOTEST",value,sizeof(value))) {
         testStarted=true;testing=true;bool host=strcmp(value,"host")==0;
         OpenLobby(menu);
-        if(GetEnvironmentVariableA("TH09_TEST_MODE",value,sizeof(value))) mode=strcmp(value,"boss")==0 ? 1:0;
+        if(GetEnvironmentVariableA("TH09_TEST_MODE",value,sizeof(value))) mode=(strcmp(value,"boss")==0 || strcmp(value,"story")==0) ? 1:0;
         character=host?0:1;
         if(GetEnvironmentVariableA("TH09_TEST_CHARACTER",value,sizeof(value))) character=atoi(value)%16;
-        if(GetEnvironmentVariableA("TH09_TEST_BOSS",value,sizeof(value))) boss=atoi(value)%16;
         if(GetEnvironmentVariableA("TH09_TEST_DIFFICULTY",value,sizeof(value))) difficulty=atoi(value)%4;
-        if(host) g_NetManager.Join(CreateRoom,U8(character),U8(difficulty),0,U8(mode),U8(mode?boss:0));
+        if(host) g_NetManager.Join(CreateRoom,U8(character),U8(difficulty),0,U8(mode),U8(0));
         else {
             GetEnvironmentVariableA("TH09_TEST_ROOM",value,sizeof(value));
-            g_NetManager.Join(JoinRoom,U8(character),U8(difficulty),U16(atoi(value)),U8(mode),U8(mode?boss:0));
+            g_NetManager.Join(JoinRoom,U8(character),U8(difficulty),U16(atoi(value)),U8(mode),U8(0));
         }
         return 1;
     }
@@ -157,28 +156,28 @@ int LobbyUpdate(MainMenu *menu) {
     }
     if(g_NetManager.GetState()!=NetManager::Lobby) return 1;
     int old=menu->cursor;menu->cursor=lobbyCursor;
-    int moved=menu->MoveMenuCursor(7);lobbyCursor=menu->cursor;menu->cursor=old;
-    if(moved && mode==0 && lobbyCursor==3) lobbyCursor+=moved;
+    int moved=menu->MoveMenuCursor(6);lobbyCursor=menu->cursor;menu->cursor=old;
+
     int delta=(g_PlayerInputs[2].IsPressed(0x80)?1:0)-(g_PlayerInputs[2].IsPressed(0x40)?1:0);
-    if(lobbyCursor==0) mode=(mode+delta+2)%2;
-    if(lobbyCursor==1) character=(character+delta+16)%16;
+    if(lobbyCursor==0) {mode=(mode+delta+2)%2;if(mode)character%=14;}
+    if(lobbyCursor==1) {int count=mode?14:16;character=(character+delta+count)%count;}
     if(lobbyCursor==2) difficulty=(difficulty+delta+4)%4;
-    if(lobbyCursor==3 && mode) boss=(boss+delta+16)%16;
+
     unsigned down=0;
-    if(lobbyCursor==6) for(int d=0;d<10;++d)
+    if(lobbyCursor==5) for(int d=0;d<10;++d)
         if((GetAsyncKeyState('0'+d)&0x8000)||(GetAsyncKeyState(VK_NUMPAD0+d)&0x8000)) {
             down|=1u<<d;if(!(digitsDown&(1u<<d))) roomCode=U16((roomCode%1000)*10+d);
         }
     if(GetAsyncKeyState(VK_BACK)&0x8000) { down|=1024;if(!(digitsDown&1024)) roomCode/=10; }
     digitsDown=down;
     if(g_PlayerInputs[2].unk_6&0x1001) {
-        if(lobbyCursor==0) mode=1-mode;
-        else if(lobbyCursor==1) character=(character+1)%16;
+        if(lobbyCursor==0) {mode=1-mode;if(mode)character%=14;}
+        else if(lobbyCursor==1) character=(character+1)%(mode?14:16);
         else if(lobbyCursor==2) difficulty=(difficulty+1)%4;
-        else if(lobbyCursor==3 && mode) boss=(boss+1)%16;
-        else if(lobbyCursor==4) g_NetManager.Join(JoinQueue,U8(character),U8(difficulty),0,U8(mode),U8(mode?boss:0));
-        else if(lobbyCursor==5) g_NetManager.Join(CreateRoom,U8(character),U8(difficulty),0,U8(mode),U8(mode?boss:0));
-        else if(lobbyCursor==6) g_NetManager.Join(JoinRoom,U8(character),U8(difficulty),roomCode,U8(mode),U8(mode?boss:0));
+
+        else if(lobbyCursor==3) g_NetManager.Join(JoinQueue,U8(character),U8(difficulty),0,U8(mode),U8(0));
+        else if(lobbyCursor==4) g_NetManager.Join(CreateRoom,U8(character),U8(difficulty),0,U8(mode),U8(0));
+        else if(lobbyCursor==5) g_NetManager.Join(JoinRoom,U8(character),U8(difficulty),roomCode,U8(mode),U8(0));
     }
     return 1;
 }
@@ -190,7 +189,7 @@ void DrawMenu(MainMenu *menu) {
         g_App.d3dDevice->Clear(1,&panel,D3DCLEAR_TARGET,0xff10202e,1,0);
     }
     if(menu->state==1) {
-        static const char *entries[]={"Story Mode","Extra Mode","Match Mode","Local Boss Co-op","NETPLAY","Replay","Result","Music Room","Option","Quit"};
+        static const char *entries[]={"Story Mode","Extra Mode","Match Mode","Local Story Co-op","NETPLAY","Replay","Result","Music Room","Option","Quit"};
         for(int i=0;i<10;++i) {
             DWORD tint=i==1 && !g_PlayRecord.openEntries3[12]?0xff506070:i==titleCursor?0xffffe0a0:0xffd0d8ff;
             float y=146.0f+i*25;
@@ -201,14 +200,13 @@ void DrawMenu(MainMenu *menu) {
         ui::Title(150,55,0xffffff80,"NETPLAY");
         Text(120,88,0xffffffff,g_NetManager.Online()?"Server: Online":"Server: Offline");
         if(g_NetManager.Online()) Text(380,88,0xffffffff,"Ping: %d ms",g_NetManager.PingMs());
-        for(int i=0;i<7;++i) {
+        for(int i=0;i<6;++i) {
             D3DXVECTOR3 p(125,145.0f+i*31,0);g_AsciiText.color=i==lobbyCursor?0xffffff80:0xffc0d0ff;
-            if(i==0) ui::Format(p.x,p.y,g_AsciiText.color,"Mode: %s",mode?"Friends vs Boss":"Duel 1 vs 1");
+            if(i==0) ui::Format(p.x,p.y,g_AsciiText.color,"Mode: %s",mode?"Story Co-op":"Duel 1 vs 1");
             else if(i==1) ui::Format(p.x,p.y,g_AsciiText.color,"Character: %s",g_ReplayMenuCharacterNames[character]);
             else if(i==2) ui::Format(p.x,p.y,g_AsciiText.color,"Difficulty: %s",g_ReplayMenuDifficultyNames[difficulty]);
-            else if(i==3) ui::Format(p.x,p.y,g_AsciiText.color,mode?"Boss: %s":"Boss: --",g_ReplayMenuCharacterNames[boss]);
-            else if(i==4) ui::Format(p.x,p.y,g_AsciiText.color,"Quick Match");
-            else if(i==5) ui::Format(p.x,p.y,g_AsciiText.color,"Create Room");
+            else if(i==3) ui::Format(p.x,p.y,g_AsciiText.color,"Quick Match");
+            else if(i==4) ui::Format(p.x,p.y,g_AsciiText.color,"Create Room");
             else ui::Format(p.x,p.y,g_AsciiText.color,"Join Room: %04d",roomCode);
         }
         if(g_NetManager.GetState()==NetManager::Searching) {
@@ -221,16 +219,18 @@ void DrawMenu(MainMenu *menu) {
     g_AsciiText.color=color;g_AsciiText.SetScale(sx,sy);g_AsciiText.inArena=arena;
 }
 void BeginFrame() {
-    if(coop::Active() && g_App.scene!=2) coop::Stop();
-    if(active && g_App.scene!=2) {
+    if(coop::Active() && g_App.scene==9)coop::OnEnding();
+    bool storyTransition=coop::Active() && (g_App.scene==3 || g_App.scene==9 || g_App.scene==10 || g_App.scene==11 || g_App.scene==12 || g_App.scene==13);
+    if(coop::Active() && g_App.scene!=2 && !storyTransition) coop::Stop();
+    if(active && g_App.scene!=2 && !storyTransition) {
         bool test=testing;EndSession();if(test) g_GameWindow.isClosing=1;return;
     }
     g_NetManager.Poll();
 }
 bool WaitForPeer() {
-    if(!active) return false;
+    if(!active) return coop::WaitForInputs();
     if(g_NetManager.GetState()!=NetManager::Matched) {
-        if(coop::Active()) return false;
+        if(coop::Active()) return coop::WaitForInputs();
         if(g_GameManager.unk_108[0]>=2 || g_GameManager.unk_108[1]>=2)
             strcpy(disconnectNotice,"Match finished. NETPLAY: create or join a new room.");
         else strncpy(disconnectNotice,g_NetManager.ErrorText(),sizeof(disconnectNotice)-1);
@@ -243,7 +243,7 @@ bool WaitForPeer() {
         return true;
     }
     if(!started) { started=true;tick=g_NetManager.StartTick();roundStart=tick; }
-    return false;
+    return coop::Networked() ? coop::WaitForInputs():false;
 }
 bool HandlePause(const PacketGameEvent &event) {
     if(event.type!=PauseState) return false;
@@ -344,8 +344,8 @@ bool PostMatchUpdate() {
 }
 void BeginGameUpdate() {
     if(!active) { coop::Update();return; }
-    PollPause();
     if(coop::Networked()) { coop::Update();return; }
+    PollPause();
     if(!Active()) return;
     int local=g_NetManager.Match().role;
     g_PlayerInputs[local]=g_PlayerInputs[2];
@@ -419,12 +419,12 @@ void BeginGameUpdate() {
     ++tick;
 }
 void BeforePlayer(Player *player) {
-    if(!RemotePlayer(player->sideIdx)) return;
+    if(coop::Active() || !RemotePlayer(player->sideIdx)) return;
     float x,y;U16 input;U32 frame=coop::Networked()?coop::Tick():tick;
     if(g_NetManager.RemotePosition(frame,x,y,input)) { player->pos.x=x;player->pos.y=y; }
 }
 void AfterPlayer(Player *player) {
-    if(!Active() || RemotePlayer(player->sideIdx) || NetworkPaused()) return;
+    if(coop::Active() || !Active() || RemotePlayer(player->sideIdx) || NetworkPaused()) return;
     FrameSample sample;sample.tick=coop::Networked()?coop::Tick():tick;
     sample.x=player->pos.x;sample.y=player->pos.y;sample.inputMask=g_PlayerInputs[player->sideIdx].unk_0;
     g_NetManager.SendFrame(sample);

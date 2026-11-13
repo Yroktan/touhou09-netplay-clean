@@ -7,6 +7,9 @@
 #include "gui.h"
 #include "enemy.h"
 #include "spellcard.h"
+#ifdef TH09_NATIVE_NETPLAY
+#include "CoopGame.h"
+#endif
 
 
 
@@ -665,6 +668,13 @@ int Player::LoadAnms()
 
 static int FreeResources(Player *player)
 {
+#ifdef TH09_NATIVE_NETPLAY
+    if(coop::OwnPlayerAssets(player)) {
+        g_SpriteEngine->ReleaseAnm(19);
+        if(player->shtFile)g_MemoryTracker.Free(player->shtFile);
+        player->shtFile=NULL;return 0;
+    }
+#endif
     if (FreesResources())
     {
         g_SpriteEngine->ReleaseAnm(player->sideIdx + 5);
@@ -1235,6 +1245,13 @@ void Player::DrawUnknown30454()
 
 int Player::CheckHitAreas(D3DXVECTOR3 *pos, D3DXVECTOR3 *size, Bullet *bullet)
 {
+#ifdef TH09_NATIVE_NETPLAY
+    Player *partner=coop::Companion();
+    if(partner && this!=partner && this->sideIdx==0) {
+        int result=partner->CheckHitAreas(pos,size,bullet);
+        if(result)return result;
+    }
+#endif
     PlayerHitArea **area;
 
 
@@ -1329,6 +1346,13 @@ int Player::CheckHitAreas(D3DXVECTOR3 *pos, D3DXVECTOR3 *size, Bullet *bullet)
 
 int Player::CheckGraze(D3DXVECTOR3 *pos, D3DXVECTOR3 *size, Bullet *bullet)
 {
+#ifdef TH09_NATIVE_NETPLAY
+    Player *partner=coop::Companion();
+    if(partner && this!=partner && this->sideIdx==0) {
+        int result=partner->CheckGraze(pos,size,bullet);
+        if(result)return result;
+    }
+#endif
     D3DXVECTOR3 start;
     D3DXVECTOR3 end;
 
@@ -1488,6 +1512,9 @@ static int UpdateDyingState(Player *player)
     else
     {
         amount = 130.0f - player->unk_a8 * 10.0f;
+#ifdef TH09_NATIVE_NETPLAY
+        if(coop::Active() && amount<30.0f)amount=30.0f;
+#endif
     }
     player->AddUnknown30388(amount);
     player->SetPlayerState(3);
@@ -1526,6 +1553,9 @@ static int CheckDeath(Player *player)
 
 int Player::OnUpdate(Player *player)
 {
+#ifdef TH09_NATIVE_NETPLAY
+    coop::BeforeLeader(player);
+#endif
     GameSide *otherSide;
 
     if (g_GameManager.stateFlags & 0x1800)
@@ -1728,6 +1758,11 @@ int Player::AddedCallback(Player *player)
 {
     GameSide *side;
 
+#ifdef TH09_NATIVE_NETPLAY
+    if(coop::OwnPlayerAssets(player)) {
+        if(LoadShotTypeFile(&player->shtFile,g_CharacterFiles[coop::CompanionCharacter()][0]))return -1;
+    } else
+#endif
     if (g_ShtFiles[player->sideIdx] != NULL && player->side->character == player->side->unk_24)
     {
         player->shtFile = g_ShtFiles[player->sideIdx];
@@ -1750,7 +1785,12 @@ int Player::AddedCallback(Player *player)
     player->unk_303f8 = g_CharacterValuesB50[side->character];
     player->unk_303fc = g_CharacterValuesB10[side->character];
     player->unk_30400 = g_CharacterValuesAd0[side->character];
+#ifdef TH09_NATIVE_NETPLAY
+    if(coop::OwnPlayerAssets(player))player->anm=g_SpriteEngine->LoadAnm(19,g_CharacterFiles[coop::CompanionCharacter()][1]);
+    else
+#endif
     player->anm = g_SpriteEngine->GetAnm(player->sideIdx + 5);
+    if(!player->anm)return -1;
     player->hitboxSize.x = player->hitboxSize.y = player->shtFile->hitboxSize / 2.0f;
     player->hitboxSize.z = 5.0f;
     player->grazeSize.x = player->grazeSize.y = player->shtFile->grazeSize / 2.0f;
@@ -2005,6 +2045,10 @@ int Player::UpdateShotInput()
     int before;
 
     side = this->sideIdx;
+#ifdef TH09_NATIVE_NETPLAY
+    if(coop::Active() && side==0 && g_PlayerInputs[side].IsHeld2(1) && this->unk_303a4<0)
+        this->unk_303a4=0;
+#endif
     if ((g_PlayerInputs[side].IsJustPressed2(1) && !(g_GameManager.config->unk_b4[side] == 1 && g_PlayerInputs[side].IsHeld2(4))) ||
         ((chargeType = g_GameManager.config->unk_b4[side]) == 1 && g_PlayerInputs[side].IsHeld2(1) &&
          !g_PlayerInputs[side].IsHeld2(4)))
@@ -2248,5 +2292,16 @@ int Player::CalcDamage(D3DXVECTOR3 *pos, D3DXVECTOR3 *size, int *damageTaken, in
             *kind4Damage += (*area)->damage;
         }
     }
+#ifdef TH09_NATIVE_NETPLAY
+    coop::CountDamage(this,damage);
+    Player *partner=coop::Companion();
+    if(partner && !coop::IsCompanion(this) && this->sideIdx==0) {
+        int partnerDamage=0,partnerBomb=0,partnerKind4=0;
+        damage+=partner->CalcDamage(pos,size,&partnerDamage,&partnerBomb,&partnerKind4);
+        *damageTaken+=partnerDamage;
+        if(hitByBomb)*hitByBomb|=partnerBomb;
+        *kind4Damage+=partnerKind4;
+    }
+#endif
     return damage;
 }

@@ -185,6 +185,7 @@ void GameManager::AddExtend()
 
 #ifdef TH09_NATIVE_NETPLAY
 #include "NetGame.h"
+#include "CoopGame.h"
 #endif
 int GameManager::OnUpdate(GameManager *mgr)
 {
@@ -193,7 +194,11 @@ int GameManager::OnUpdate(GameManager *mgr)
     int item;
 
     g_GameManager.unk_12c++;
-    if (g_GameManager.mode != 2 || g_GameManager.sides[0].unk_28 != 0 || g_GameManager.sides[1].unk_28 != 0)
+    if (
+#ifdef TH09_NATIVE_NETPLAY
+        !coop::Active() &&
+#endif
+        (g_GameManager.mode != 2 || g_GameManager.sides[0].unk_28 != 0 || g_GameManager.sides[1].unk_28 != 0))
     {
         g_PlayerInputs[0].unk_0 = g_PlayerInputs[2].unk_0;
         g_PlayerInputs[0].unk_2 = g_PlayerInputs[2].unk_2;
@@ -216,9 +221,11 @@ int GameManager::OnUpdate(GameManager *mgr)
         return 3;
     }
 #ifdef TH09_NATIVE_NETPLAY
-    if (thnet::WaitForPeer()) return 3;
-    thnet::BeginGameUpdate();
-    if (thnet::Active() && thnet::NetworkPaused()) return 3;
+    if (!coop::Active()) {
+        if (thnet::WaitForPeer()) return 3;
+        thnet::BeginGameUpdate();
+    }
+    if ((thnet::Active() && thnet::NetworkPaused()) || coop::Paused()) return 3;
 #endif
     if (g_GameManager.unk_38c != 0)
     {
@@ -687,6 +694,9 @@ void GameManager::ResetRound()
         g_GameManager.sides[i].gui->Reset();
     }
     g_GameManager.sides[2].effectManager->Reset();
+#ifdef TH09_NATIVE_NETPLAY
+    coop::ResetRound();
+#endif
     if (g_GameManager.mode == 2)
     {
         g_GameManager.rank.unk_b4 -= 8;
@@ -742,6 +752,9 @@ void GameManager::ResetRound()
 
 int GameManager::AddedCallback(GameManager *mgr)
 {
+#ifdef TH09_NATIVE_NETPLAY
+    coop::InstallInputChain();
+#endif
     if (g_App.scene != 3 && g_App.scene != 12 && g_App.scene != 10)
     {
         g_App.loadsResources = 1;
@@ -774,6 +787,9 @@ int GameManager::AddedCallback(GameManager *mgr)
 
 int GameManager::DeletedCallback(GameManager *mgr)
 {
+#ifdef TH09_NATIVE_NETPLAY
+    coop::Unload();
+#endif
     int i;
 
     g_GameManager.sides[0].unk_24 = g_GameManager.sides[0].character;
